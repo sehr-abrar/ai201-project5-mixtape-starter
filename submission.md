@@ -143,13 +143,78 @@ service, here's where each one points and my confidence:
 | 4 | Not notified when a friend rated my song | `notification_service.py` | `rate_song` never calls `create_notification` (confirmed while tracing above) |
 | 5 | Last song in a playlist never shows up | `playlist_service.py` | `get_playlist_songs` returns `songs[:-1]`, which drops the final element |
 
-**Rough plan — the three I'll tackle first:** Issues **#3 (search dup)**,
-**#4 (missing rate notification)**, and **#5 (playlist last song)** are the
-clearest to reproduce and reason about (a duplicated join row, a missing
-function call, and an off-by-one slice). #1 and #5 already have test files
-(`test_streaks.py`, `test_playlists.py`) I can lean on. I'll keep #1 (streak
-calendar logic) as a strong backup if I want a fourth, since the calendar-day
-edge cases are the most interesting root-cause work.
+**Chosen three (after Milestone 2 reproduction):** **#1 (streak reset)**,
+**#4 (missing rate notification)**, and **#5 (playlist last song)**.
 
-_(These are orientation hypotheses, not fixes — no service code has been changed
-in this milestone.)_
+> **Why not #3?** I originally planned #3 but could not reproduce it (see
+> Milestone 2 below) — the missing-`.distinct()` bug is real in the code but
+> latent, because the legacy `session.query(Song)` identity map collapses the
+> duplicate join rows before they reach the client. Per the milestone guidance
+> ("if you can't reproduce it, try a different one"), I swapped in #1, which
+> reproduces deterministically.
+
+---
+
+## Milestone 2: Reproducing the Bugs
+
+App run on port **5001** (macOS AirPlay owns 5000). No code was changed in this
+milestone — the streak repro drives the pure function directly and rolls back.
+
+### Bug #5 — Last song in a playlist never shows up  ✅ reproduced
+
+- **Root-cause location:** `playlist_service.py::get_playlist_songs`, final line
+  `return [song.to_dict() for song in songs[:-1]]` — the `[:-1]` slice drops the
+  last element.
+- **How I reproduced it:** Playlist *"Late Night Vibes"*
+  (`f9ba6334-40de-4894-a912-39bbe5d9e6b8`) has **7** entries in
+  `playlist_entries` (confirmed by querying the join table directly).
+  `GET /playlists/f9ba6334-.../songs` returns **`count: 6`** — the 7th
+  (highest-`position`) song is missing every time. Deterministic for any
+  non-empty playlist.
+
+### Bug #4 — Rating a friend's song sends no notification  ✅ reproduced
+
+- **Root-cause location:** `notification_service.py::rate_song` saves the
+  `Rating` and commits but never calls `create_notification` — unlike its
+  sibling `add_to_playlist`, which does notify the sharer.
+- **How I reproduced it:** Song *"Midnight Drive"*
+  (`227b2616-...`) was shared by user `f1ddabcf-...`. That sharer starts with
+  **1** notification (a `song_added_to_playlist`). A *different* user, `darius`
+  (`5348871b-...`), rated the song 5/5 via
+  `POST /songs/227b2616-.../rate`. The rating saved successfully (HTTP 201), but
+  the sharer's notification count stayed at **1** — no `song_rated` notification
+  was ever created. Expected: count should rise to 2.
+
+### Bug #1 — Listening streak resets (only on Sundays)  ✅ reproduced
+
+- **Root-cause location:** `streak_service.py::update_listening_streak`, the
+  branch `elif days_since_last == 1 and today.weekday() != 6:`. The
+  `today.weekday() != 6` clause means that when the "today" of a consecutive
+  listen falls on a **Sunday** (weekday 6), the increment branch is skipped and
+  execution falls through to `else`, resetting the streak to 1.
+- **State needed:** the *second* listen must land on a calendar Sunday, exactly
+  one day after the previous listen (Saturday).
+- **How I reproduced it:** Drove `update_listening_streak(user, now)` directly
+  with controlled dates (it takes `now` as a parameter, so no clock mocking
+  needed):
+  - `last_listened = Sat 2026-07-04`, `now = Sun 2026-07-05`, starting streak 5
+    → streak became **1** ❌ (should be 6).
+  - Controls that behaved correctly: Sun→Mon gave 6 ✅, Mon→Tue gave 6 ✅.
+    Only the transition *into* a Sunday resets, which matches the "keeps
+    resetting" report for users who listen daily.
+
+### Bug #3 — Duplicate search results  ⚠️ attempted, could not reproduce
+
+- **Why it doesn't surface:** `search_songs` does
+  `outerjoin(song_tags, ...)` with no `.distinct()`. For *"Crown Heights Anthem"*
+  (3 tags) the SQL join genuinely emits **3 rows** (I confirmed `query.count()`
+  == 3). But `.all()` on a legacy single-entity `session.query(Song)` runs the
+  ORM identity-map uniquing, collapsing them back to **1** entity. A broad
+  `?q=a` search returned 13 rows / 13 unique IDs — zero duplicates.
+- **Conclusion:** the bug is latent (it would surface if the query were rewritten
+  with `session.execute(select(...))`, or if rows were returned as tuples), but
+  not triggerable through the current endpoint — so I set it aside per the
+  milestone's fallback guidance and chose #1 instead.
+
+_(Checkpoint: all three chosen bugs — #1, #4, #5 — can be triggered on demand.
+No service code has been changed.)_
