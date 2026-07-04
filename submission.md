@@ -292,3 +292,69 @@ for. (4) Full test suite: 12 pass; the single failure
 module, not a regression from this change.
 _(AI usage: used AI to sanity-check the "compare the two sibling functions"
 navigation strategy; confirmed the missing call myself by reading both.)_
+
+### RCA — Bug #1: Listening streak keeps resetting (only on Sundays)
+
+**How I reproduced it:** `update_listening_streak(user, now)` takes `now` as a
+parameter, so I drove it directly with controlled dates instead of mocking the
+clock. Starting streak 5, `last_listened = Sat 2026-07-04`, `now = Sun
+2026-07-05` (a consecutive day) → the streak dropped to **1** instead of rising
+to 6. Control transitions on other days (Sun→Mon, Mon→Tue) all correctly gave 6.
+The failing unit test `tests/test_streaks.py::test_streak_increments_on_sunday`
+independently confirmed it.
+
+**How I found the root cause:** Traced from `POST /songs/<id>/listen` →
+`routes/songs.py::listen` → `streak_service.record_listening_event` →
+`update_listening_streak`. Read the branch structure. The docstring states the
+rule plainly: "If the user listened yesterday: streak increments by 1." The code
+was `elif days_since_last == 1 and today.weekday() != 6:`. The
+`days_since_last == 1` half correctly detects "listened yesterday," but the
+extra `and today.weekday() != 6` clause contradicts the documented rule — there
+is no calendar reason a streak should behave differently on one weekday. That
+mismatch between the docstring and the added condition was the moment I was
+confident this was the cause, not just a suspicious area.
+
+**The root cause:** Python's `datetime.weekday()` returns **6 for Sunday**. The
+increment branch required `today.weekday() != 6`, so whenever a user's
+consecutive-day listen fell on a Sunday, the `days_since_last == 1` branch was
+skipped and execution fell through to the `else`, which resets the streak to 1.
+In effect, any daily listener's streak was wiped out every Sunday — regardless
+of the fact that they *had* listened the day before. The `weekday() != 6`
+condition was spurious logic that never belonged in a "did they listen
+yesterday?" check.
+
+**My fix and side-effect check:** Removed the ` and today.weekday() != 6`
+clause, leaving `elif days_since_last == 1:`. Now a listen exactly one calendar
+day after the previous one always increments, on every weekday. Because this is
+a boundary-condition bug, I verified **both sides of the boundary**:
+`days_since_last == 1` on a Sunday now increments (5 → 6); a skipped day
+(`days_since_last == 2`, Sat→Mon) still correctly **resets** to 1; and a
+same-day repeat (`days_since_last == 0`) still correctly **no-ops** at 5. Full
+test suite went from 12-pass/1-fail to **13/13 pass**, with
+`test_streak_increments_on_sunday` now green.
+_(AI usage: confirmed with AI that `datetime.weekday()` returns 6 for Sunday —
+Mon=0 … Sun=6 — vs. `isoweekday()` where Sun=7; this ruled out any "off-by-one
+weekday convention" interpretation and confirmed the clause was simply spurious
+rather than a wrong constant.)_
+
+---
+
+## Summary
+
+Three bugs fixed, each a separate commit, each with a one-line root cause:
+
+| # | Bug | Root cause | Fix |
+|---|-----|-----------|-----|
+| 5 | Last playlist song missing | `songs[:-1]` slice truncated the result | `songs[:-1]` → `songs` |
+| 4 | No notification on rating | `rate_song` never called `create_notification` | added a guarded `create_notification` mirroring `add_to_playlist` |
+| 1 | Streak resets on Sundays | spurious `and today.weekday() != 6` in the "listened yesterday" branch (`weekday()` returns 6 for Sunday) | removed the clause |
+
+Bug #3 (search duplicates) was investigated but is latent — the ORM identity map
+collapses the duplicate join rows before they reach the client, so it can't be
+triggered through the current endpoint.
+
+### AI usage (overall)
+AI was used to *explain* code I had already located and to *confirm* library
+semantics (`weekday()` vs `isoweekday()`), never to locate the bugs. Every root
+cause was found by reading the code and verified by running the affected
+function with controlled inputs before writing the fix.
