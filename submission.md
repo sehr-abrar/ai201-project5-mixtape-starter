@@ -218,3 +218,38 @@ milestone — the streak repro drives the pure function directly and rolls back.
 
 _(Checkpoint: all three chosen bugs — #1, #4, #5 — can be triggered on demand.
 No service code has been changed.)_
+
+---
+
+## Milestone 3: Root Cause Analyses
+
+### RCA — Bug #5: The last song in a playlist never shows up
+
+**How I reproduced it:** Queried the `playlist_entries` join table directly and
+confirmed playlist *"Late Night Vibes"* has 7 rows. Called
+`GET /playlists/<id>/songs` and got `count: 6` — the highest-`position` song was
+always absent. Reproducible for every non-empty playlist.
+
+**How I found the root cause:** Started at the route
+`routes/playlists.py::get_songs`, which delegates to
+`playlist_service.get_playlist_songs`. Read that function top to bottom. The
+SQL query itself is correct — it joins `playlist_entries`, filters by playlist,
+and orders by `position asc`, returning all 7 `Song` rows. The moment of
+certainty was the very last line: the query result `songs` was sliced with
+`songs[:-1]` in the return statement. That slice, not the query, is what drops a
+row — and it drops exactly one, the last, which matches the symptom precisely.
+
+**The root cause:** `get_playlist_songs` ended with
+`return [song.to_dict() for song in songs[:-1]]`. The `[:-1]` slice returns every
+element *except the last*, so the final song (the one with the highest
+`position`) was silently discarded on every call. The database, the join, and
+the ordering were all correct; the bug was purely the truncating slice in the
+serialization step.
+
+**My fix and side-effect check:** Changed `songs[:-1]` to `songs` — the smallest
+possible fix, one token. Side-effect checks: (1) all three seeded playlists now
+return API count == DB entry count (7 == 7). (2) Ordering by `position` is
+unchanged, so songs still come back in playlist order. (3) Empty-playlist edge
+case: created a fresh empty playlist and confirmed it returns `[]` rather than
+erroring. (4) Ran `pytest tests/test_playlists.py` — 3/3 pass.
+_(AI usage: none needed for this one — the slice was self-evident on reading.)_
