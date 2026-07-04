@@ -1,5 +1,31 @@
 # Project 5: Mixtape Bug Hunt — Submission
 
+## AI Usage
+
+I used an AI coding assistant (Claude Code) throughout this project, and it did
+a lot of the hands-on work with me.
+
+- **Codebase navigation:** I had it read through the README, `models.py`, and
+  all of the route and service files, and help me build the codebase map —
+  summarizing what each file is responsible for and tracing the data flows
+  (route → service → model).
+- **Reproducing the bugs:** it helped me pull real IDs out of the seeded
+  database and drive the endpoints / service functions to trigger each reported
+  bug before any code was changed, including proving why Bug #3 couldn't be
+  reproduced (the ORM collapses the duplicate rows) so I could swap it for #1.
+- **Implementing the fixes:** it helped me implement all three fixes —
+  the playlist slice (#5), the missing rating notification (#4), and the Sunday
+  streak-reset condition (#1) — and wrote the verification checks that confirmed
+  each fix worked on both sides of the boundary without breaking related
+  functionality or the test suite.
+- **Writing this document:** it helped me draft the codebase map and the root
+  cause analysis entries.
+
+Where I verified things: after each fix I confirmed the behavior no longer
+reproduced and re-ran the full `pytest` suite (ending at 13/13 passing), and I
+checked library semantics like `datetime.weekday()` returning 6 for Sunday
+rather than taking the explanation at face value.
+
 ## Milestone 1: Codebase Map
 
 Mixtape is a Flask + SQLAlchemy JSON API for a social music app. There is no
