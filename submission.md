@@ -253,3 +253,42 @@ unchanged, so songs still come back in playlist order. (3) Empty-playlist edge
 case: created a fresh empty playlist and confirmed it returns `[]` rather than
 erroring. (4) Ran `pytest tests/test_playlists.py` — 3/3 pass.
 _(AI usage: none needed for this one — the slice was self-evident on reading.)_
+
+### RCA — Bug #4: Notified when a friend adds my song to a playlist, but not when they rate it
+
+**How I reproduced it:** Song *"Midnight Drive"* was shared by user
+`f1ddabcf-...`, who started with 1 notification. A different user (`darius`)
+rated the song via `POST /songs/<id>/rate` with `{score: 5}`. The rating saved
+(HTTP 201), but re-fetching `GET /users/f1ddabcf-.../notifications` still showed
+count 1 — no `song_rated` notification appeared.
+
+**How I found the root cause:** The report itself was the clue — playlist-add
+notifications work, rating notifications don't, so the two code paths must
+diverge. Both live in `notification_service.py`. I read `add_to_playlist` and
+`rate_song` side by side. `add_to_playlist` ends with a guarded call to
+`create_notification(... type="song_added_to_playlist" ...)`. `rate_song`, by
+contrast, saves the `Rating`, commits, and returns — with **no**
+`create_notification` call anywhere in the function. That structural difference
+between the two sibling functions was the moment of certainty: the notification
+step wasn't broken, it was simply never written for the rating path.
+
+**The root cause:** `rate_song` created/updated the `Rating` row and committed,
+but never invoked `create_notification`. The notification-on-interaction feature
+was only half-implemented — wired up for playlist adds but omitted for ratings —
+so the song's original sharer was never told when someone rated their song.
+
+**My fix and side-effect check:** After the commit in `rate_song`, I added a
+guarded `create_notification` call that mirrors the exact pattern already used in
+`add_to_playlist`: notify `song.shared_by` with type `"song_rated"`, and only if
+`song.shared_by != user_id` so a user rating their own shared song doesn't
+notify themselves. Side-effect checks: (1) a friend rating a song raises the
+sharer's notification count by exactly 1, of type `song_rated`. (2) A user
+rating their **own** shared song produces no notification (the guard works).
+(3) Re-rating an already-rated song still works and notifies again — acceptable,
+since a changed rating is genuinely new information for the sharer, and it
+matches the "smallest fix" goal without adding dedup logic the issue didn't ask
+for. (4) Full test suite: 12 pass; the single failure
+(`test_streak_increments_on_sunday`) is the still-unfixed Bug #1 in a different
+module, not a regression from this change.
+_(AI usage: used AI to sanity-check the "compare the two sibling functions"
+navigation strategy; confirmed the missing call myself by reading both.)_
