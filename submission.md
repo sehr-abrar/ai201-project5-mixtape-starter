@@ -379,8 +379,5 @@ Bug #3 (search duplicates) was investigated but is latent — the ORM identity m
 collapses the duplicate join rows before they reach the client, so it can't be
 triggered through the current endpoint.
 
-### AI usage (overall)
-AI was used to *explain* code I had already located and to *confirm* library
-semantics (`weekday()` vs `isoweekday()`), never to locate the bugs. Every root
-cause was found by reading the code and verified by running the affected
-function with controlled inputs before writing the fix.
+_(Full AI usage is documented in the **AI Usage** section at the top of this
+document.)_
